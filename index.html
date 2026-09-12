@@ -15,9 +15,9 @@
     --text: #f1f5f9;
     --text-dim: #94a3b8;
   }
-
+ 
   * { box-sizing: border-box; }
-
+ 
   body {
     margin: 0;
     min-height: 100vh;
@@ -29,20 +29,20 @@
     align-items: center;
     padding: 24px 16px 40px;
   }
-
+ 
   h1 {
     font-size: 1.25rem;
     font-weight: 600;
     margin: 0 0 4px;
   }
-
+ 
   .subtitle {
     color: var(--text-dim);
     font-size: 0.85rem;
     margin-bottom: 20px;
     text-align: center;
   }
-
+ 
   #reader-wrapper {
     width: 100%;
     max-width: 380px;
@@ -51,11 +51,11 @@
     border: 2px solid #334155;
     background: #000;
   }
-
+ 
   #reader {
     width: 100%;
   }
-
+ 
   #status-card {
     width: 100%;
     max-width: 380px;
@@ -70,21 +70,21 @@
     justify-content: center;
     transition: background 0.2s ease;
   }
-
+ 
   #status-card.success { background: rgba(34, 197, 94, 0.15); border: 1px solid var(--accent); }
   #status-card.error   { background: rgba(239, 68, 68, 0.15); border: 1px solid var(--danger); }
   #status-card.idle    { background: var(--card); border: 1px solid #334155; }
-
+ 
   #status-text {
     font-size: 1rem;
     font-weight: 500;
   }
-
+ 
   #status-card.idle #status-text {
     color: var(--text-dim);
     font-weight: 400;
   }
-
+ 
   .spinner {
     width: 18px;
     height: 18px;
@@ -94,9 +94,9 @@
     animation: spin 0.7s linear infinite;
     margin-right: 10px;
   }
-
+ 
   @keyframes spin { to { transform: rotate(360deg); } }
-
+ 
   #manual-toggle {
     margin-top: 18px;
     background: none;
@@ -107,7 +107,7 @@
     font-size: 0.8rem;
     cursor: pointer;
   }
-
+ 
   #manual-entry {
     display: none;
     width: 100%;
@@ -115,9 +115,9 @@
     margin-top: 14px;
     gap: 8px;
   }
-
+ 
   #manual-entry.visible { display: flex; }
-
+ 
   #manual-id {
     flex: 1;
     padding: 10px 14px;
@@ -127,7 +127,7 @@
     color: var(--text);
     font-size: 0.9rem;
   }
-
+ 
   #manual-submit {
     padding: 10px 16px;
     border-radius: 10px;
@@ -137,29 +137,73 @@
     font-weight: 600;
     cursor: pointer;
   }
-
+ 
   #manual-submit:active { background: var(--accent-dim); }
+ 
+  #scan-btn {
+    margin-top: 20px;
+    width: 100%;
+    max-width: 380px;
+    padding: 16px;
+    border: none;
+    border-radius: 14px;
+    background: var(--accent);
+    color: #06210f;
+    font-size: 1.05rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+ 
+  #scan-btn:active { background: var(--accent-dim); }
+ 
+  #scan-btn:disabled {
+    background: #334155;
+    color: var(--text-dim);
+    cursor: not-allowed;
+  }
+ 
+  #reader-wrapper {
+    position: relative;
+  }
+ 
+  #reader-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px;
+    font-size: 0.9rem;
+    color: var(--text-dim);
+  }
+ 
+  #reader-overlay.hidden { display: none; }
 </style>
 </head>
 <body>
-
+ 
   <h1>COE Attendance Scanner</h1>
   <div class="subtitle">Point the camera at a student's QR code</div>
-
+ 
   <div id="reader-wrapper">
     <div id="reader"></div>
+    <div id="reader-overlay">Tap "Scan QR Code" below to begin</div>
   </div>
-
+ 
+  <button id="scan-btn">Scan QR Code</button>
+ 
   <div id="status-card" class="idle">
     <span id="status-text">Waiting for scan…</span>
   </div>
-
+ 
   <button id="manual-toggle">Enter ID manually</button>
   <div id="manual-entry">
     <input id="manual-id" type="text" placeholder="e.g. 2023-4-0422" />
     <button id="manual-submit">Submit</button>
   </div>
-
+ 
   <script>
     // =======================================================
     // CONFIG — fill these in
@@ -167,20 +211,17 @@
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzu91PZzlmqXve_4tZ7xtYxfCW2le2X391vWuYVHx4KwiSPfY6ssSO1UN5K6zM5-7To/exec"; // e.g. https://script.google.com/macros/s/AKfycb.../exec
     const DEVICE_KEY = "COE_ATTENDANCE"; // must match SECRET_KEY in Code.gs
     // =======================================================
-
+ 
     const statusCard = document.getElementById("status-card");
     const statusText = document.getElementById("status-text");
-
+ 
     let isProcessing = false;      // prevents duplicate calls while one is in flight
-    let lastScannedId = null;
-    let lastScanTime = 0;
-    const RESCAN_COOLDOWN_MS = 5000; // ignore the same ID again within 5s (rapid double-read protection)
-
+ 
     function setStatus(message, type) {
       statusCard.className = type; // "idle" | "success" | "error" | "loading"
       statusText.textContent = message;
     }
-
+ 
     function setLoading(message) {
       statusCard.className = "idle";
       statusText.innerHTML = "";
@@ -189,29 +230,21 @@
       statusText.appendChild(spinner);
       statusText.appendChild(document.createTextNode(message));
     }
-
+ 
     async function submitScan(studentId) {
       if (isProcessing) return;
-
-      const now = Date.now();
-      if (studentId === lastScannedId && (now - lastScanTime) < RESCAN_COOLDOWN_MS) {
-        return; // same ID scanned again too quickly — ignore
-      }
-
-      lastScannedId = studentId;
-      lastScanTime = now;
+ 
       isProcessing = true;
-
       setLoading("Recording " + studentId + "…");
-
+ 
       try {
         const url = SCRIPT_URL
           + "?id=" + encodeURIComponent(studentId)
           + "&key=" + encodeURIComponent(DEVICE_KEY);
-
+ 
         const response = await fetch(url, { method: "GET" });
         const text = await response.text();
-
+ 
         if (text.toLowerCase().includes("recorded")) {
           setStatus("✅ " + text, "success");
         } else {
@@ -223,41 +256,86 @@
         isProcessing = false;
       }
     }
-
-    // --- QR camera scanning ---
-    function onScanSuccess(decodedText) {
-      submitScan(decodedText.trim());
+ 
+    // --- QR camera scanning (armed / one-shot per button press) ---
+    const scanBtn = document.getElementById("scan-btn");
+    const readerOverlay = document.getElementById("reader-overlay");
+ 
+    let html5QrCode = null;
+    let isArmed = false;       // true only right after the button is tapped, until one QR is read
+    let cameraStarted = false;
+ 
+    function armScanner() {
+      isArmed = true;
+      readerOverlay.classList.add("hidden");
+      scanBtn.disabled = true;
+      scanBtn.textContent = "Scanning…";
+      setStatus("Point camera at QR code…", "idle");
     }
-
+ 
+    function disarmScanner(overlayMessage) {
+      isArmed = false;
+      readerOverlay.textContent = overlayMessage || 'Tap "Scan QR Code" below to begin';
+      readerOverlay.classList.remove("hidden");
+      scanBtn.disabled = false;
+      scanBtn.textContent = "Scan QR Code";
+    }
+ 
+    function onScanSuccess(decodedText) {
+      if (!isArmed) return; // camera is running but we're ignoring reads until armed again
+      isArmed = false; // immediately stop accepting further reads for this session
+ 
+      if (cameraStarted) {
+        html5QrCode.pause(true); // freeze the video feed so it can't re-read the same code
+      }
+ 
+      submitScan(decodedText.trim()).finally(() => {
+        disarmScanner('Tap "Scan QR Code" for the next student');
+      });
+    }
+ 
     function onScanFailure() {
       // fires continuously while no QR is in frame — ignore silently
     }
-
+ 
     if (typeof Html5Qrcode === "undefined") {
-      // The CDN script failed to load (no internet, blocked, or offline file access)
       setStatus("⚠️ Scanner library failed to load. Check your internet connection and reload the page.", "error");
+      scanBtn.disabled = true;
     } else {
-      const html5QrCode = new Html5Qrcode("reader");
-      html5QrCode.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 240, height: 240 } },
-        onScanSuccess,
-        onScanFailure
-      ).catch((err) => {
-        setStatus("⚠️ Camera error: " + err, "error");
+      html5QrCode = new Html5Qrcode("reader");
+ 
+      scanBtn.addEventListener("click", () => {
+        if (!cameraStarted) {
+          // First tap: actually start the camera
+          html5QrCode.start(
+            { facingMode: "environment" },
+            { fps: 10, qrbox: { width: 240, height: 240 } },
+            onScanSuccess,
+            onScanFailure
+          ).then(() => {
+            cameraStarted = true;
+            armScanner();
+          }).catch((err) => {
+            setStatus("⚠️ Camera error: " + err, "error");
+          });
+        } else {
+          // Already running (possibly paused from a previous scan) — just resume + arm
+          html5QrCode.resume();
+          armScanner();
+        }
       });
     }
-
+ 
     // --- Manual entry fallback ---
     const manualToggle = document.getElementById("manual-toggle");
     const manualEntry = document.getElementById("manual-entry");
     const manualId = document.getElementById("manual-id");
     const manualSubmit = document.getElementById("manual-submit");
-
+ 
     manualToggle.addEventListener("click", () => {
       manualEntry.classList.toggle("visible");
     });
-
+ 
     manualSubmit.addEventListener("click", () => {
       const id = manualId.value.trim();
       if (id) {
@@ -265,11 +343,18 @@
         manualId.value = "";
       }
     });
-
+ 
     manualId.addEventListener("keydown", (e) => {
       if (e.key === "Enter") manualSubmit.click();
     });
   </script>
-
+ 
 </body>
 </html>
+ 
+
+
+
+
+
+
