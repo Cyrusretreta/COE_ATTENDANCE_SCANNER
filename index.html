@@ -140,6 +140,36 @@
 
   #manual-submit:active { background: var(--accent-dim); }
 
+  .toggle-group {
+    width: 100%;
+    max-width: 380px;
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+  }
+
+  .toggle-group:first-of-type {
+    margin-top: 20px;
+  }
+
+  .toggle-btn {
+    flex: 1;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid #334155;
+    background: var(--card);
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .toggle-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #06210f;
+  }
+
   #scan-btn {
     margin-top: 20px;
     width: 100%;
@@ -192,6 +222,16 @@
     <div id="reader-overlay">Tap "Scan QR Code" below to begin</div>
   </div>
 
+  <div class="toggle-group" id="session-group">
+    <button class="toggle-btn active" data-value="AM">AM</button>
+    <button class="toggle-btn" data-value="PM">PM</button>
+  </div>
+
+  <div class="toggle-group" id="action-group">
+    <button class="toggle-btn active" data-value="in">Log In</button>
+    <button class="toggle-btn" data-value="out">Log Out</button>
+  </div>
+
   <button id="scan-btn">Scan QR Code</button>
 
   <div id="status-card" class="idle">
@@ -217,6 +257,25 @@
 
     let isProcessing = false;      // prevents duplicate calls while one is in flight
 
+    // --- Session (AM/PM) and Action (in/out) toggles ---
+    let selectedSession = "AM";
+    let selectedAction = "in";
+
+    function setupToggleGroup(groupId, onChange) {
+      const group = document.getElementById(groupId);
+      const buttons = group.querySelectorAll(".toggle-btn");
+      buttons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          buttons.forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          onChange(btn.dataset.value);
+        });
+      });
+    }
+
+    setupToggleGroup("session-group", (value) => { selectedSession = value; });
+    setupToggleGroup("action-group", (value) => { selectedAction = value; });
+
     function setStatus(message, type) {
       statusCard.className = type; // "idle" | "success" | "error" | "loading"
       statusText.textContent = message;
@@ -235,17 +294,19 @@
       if (isProcessing) return;
 
       isProcessing = true;
-      setLoading("Recording " + studentId + "…");
+      setLoading("Recording " + studentId + " (" + selectedSession + " " + (selectedAction === "in" ? "Time In" : "Time Out") + ")…");
 
       try {
         const url = SCRIPT_URL
           + "?id=" + encodeURIComponent(studentId)
-          + "&key=" + encodeURIComponent(DEVICE_KEY);
+          + "&key=" + encodeURIComponent(DEVICE_KEY)
+          + "&session=" + encodeURIComponent(selectedSession)
+          + "&action=" + encodeURIComponent(selectedAction);
 
         const response = await fetch(url, { method: "GET" });
         const text = await response.text();
 
-        if (text.toLowerCase().includes("recorded")) {
+        if (text.toLowerCase().includes("recorded") && !text.toLowerCase().includes("already")) {
           setStatus("✅ " + text, "success");
         } else {
           setStatus("⚠️ " + text, "error");
