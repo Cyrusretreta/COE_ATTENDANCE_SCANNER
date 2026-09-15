@@ -210,6 +210,47 @@
   }
 
   #reader-overlay.hidden { display: none; }
+
+  .sync-bar {
+    width: 100%;
+    max-width: 380px;
+    margin-top: 14px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    background: rgba(234, 179, 8, 0.12);
+    border: 1px solid #a16207;
+    color: #fde68a;
+    font-size: 0.85rem;
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .sync-bar.visible { display: flex; }
+
+  .sync-bar button {
+    background: #a16207;
+    color: #fef3c7;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .conn-badge {
+    width: 100%;
+    max-width: 380px;
+    text-align: center;
+    font-size: 0.75rem;
+    margin-top: 10px;
+    color: var(--text-dim);
+  }
+
+  .conn-badge.offline { color: #fca5a5; }
 </style>
 </head>
 <body>
@@ -244,11 +285,17 @@
     <button id="manual-submit">Submit</button>
   </div>
 
+  <div class="sync-bar" id="sync-bar">
+    <span id="sync-text">0 scans waiting to sync</span>
+    <button id="sync-now-btn">Sync Now</button>
+  </div>
+  <div class="conn-badge" id="conn-badge">● Online</div>
+
   <script>
     // =======================================================
     // CONFIG — fill these in
     // =======================================================
-    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwsbMIcnFvrExnNE2LGvQlA3rMMH5xbBbjMNYwFQmAEkL3JuqMmg7K0EjVpNmQygINe/exec"; // e.g. https://script.google.com/macros/s/AKfycb.../exec
+    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzu91PZzlmqXve_4tZ7xtYxfCW2le2X391vWuYVHx4KwiSPfY6ssSO1UN5K6zM5-7To/exec"; // e.g. https://script.google.com/macros/s/AKfycb.../exec
     const DEVICE_KEY = "COE_ATTENDANCE"; // must match SECRET_KEY in Code.gs
     // =======================================================
 
@@ -290,33 +337,173 @@
       statusText.appendChild(document.createTextNode(message));
     }
 
-    async function submitScan(studentId) {
+    // --- Parses a scanned QR payload. Expected format: "ID|Name|Program".
+    //     Falls back gracefully if it's just a plain ID (e.g. manual entry). ---
+    function parseQrPayload(text) {
+      const parts = text.split("|");
+      if (parts.length >= 2) {
+        return {
+          id: parts[0].trim(),
+          name: parts[1] ? parts[1].trim() : null,
+          program: parts[2] ? parts[2].trim() : null
+        };
+      }
+      return { id: text.trim(), name: null, program: null };
+    }
+
+    async function submitScan(payload) {
       if (isProcessing) return;
 
-      isProcessing = true;
-      setLoading("Recording " + studentId + " (" + selectedSession + " " + (selectedAction === "in" ? "Time In" : "Time Out") + ")…");
+      // Accept either a plain string (manual entry) or a parsed { id, name, program } object
+      if (typeof payload === "string") {
+        payload = { id: payload, name: null, program: null };
+      }
 
+      isProcessing = true;
+
+      const displayLabel = payload.name
+        ? payload.name + (payload.program ? " (" + payload.program + ")" : "")
+        : payload.id;
+
+      const scanRecord = {
+        id: payload.id,
+        session: selectedSession,
+        action: selectedAction,
+        clientTime: new Date().toISOString() // captured at the exact moment of scan, used even if synced later
+      };
+
+      setLoading("Recording " + displayLabel + " (" + selectedSession + " " + (selectedAction === "in" ? "Time In" : "Time Out") + ")…");
+
+      const result = await sendToServer(scanRecord);
+
+      if (result.ok) {
+        if (result.text.toLowerCase().includes("recorded") && !result.text.toLowerCase().includes("already")) {
+          setStatus("✅ " + result.text, "success");
+        } else {
+          setStatus("⚠️ " + result.text, "error");
+        }
+      } else {
+        // Network failure — assume offline (or server unreachable) and queue for later
+        queueScan(scanRecord);
+        setStatus("📥 Saved offline for " + displayLabel + " — will sync when online", "idle");
+      }
+
+      isProcessing = false;
+    }
+
+    // --- Sends one scan record to the server. Returns { ok, text }. Never throws. ---
+    async function sendToServer(record) {
       try {
         const url = SCRIPT_URL
-          + "?id=" + encodeURIComponent(studentId)
+          + "?id=" + encodeURIComponent(record.id)
           + "&key=" + encodeURIComponent(DEVICE_KEY)
-          + "&session=" + encodeURIComponent(selectedSession)
-          + "&action=" + encodeURIComponent(selectedAction);
+          + "&session=" + encodeURIComponent(record.session)
+          + "&action=" + encodeURIComponent(record.action)
+          + "&clientTime=" + encodeURIComponent(record.clientTime);
 
         const response = await fetch(url, { method: "GET" });
         const text = await response.text();
-
-        if (text.toLowerCase().includes("recorded") && !text.toLowerCase().includes("already")) {
-          setStatus("✅ " + text, "success");
-        } else {
-          setStatus("⚠️ " + text, "error");
-        }
+        return { ok: true, text: text };
       } catch (err) {
-        setStatus("⚠️ Network error — check connection and try again", "error");
-      } finally {
-        isProcessing = false;
+        return { ok: false, text: "" };
       }
     }
+
+    // =======================================================
+    // OFFLINE QUEUE
+    // =======================================================
+    const QUEUE_KEY = "coe_attendance_pending_scans";
+    const syncBar = document.getElementById("sync-bar");
+    const syncText = document.getElementById("sync-text");
+    const syncNowBtn = document.getElementById("sync-now-btn");
+    const connBadge = document.getElementById("conn-badge");
+
+    let isSyncing = false;
+
+    function getQueue() {
+      try {
+        return JSON.parse(localStorage.getItem(QUEUE_KEY)) || [];
+      } catch (e) {
+        return [];
+      }
+    }
+
+    function saveQueue(queue) {
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
+      updateSyncBar();
+    }
+
+    function queueScan(record) {
+      const queue = getQueue();
+      queue.push(record); // pushed in the exact order scanned, so sync stays chronological
+      saveQueue(queue);
+    }
+
+    function updateSyncBar() {
+      const count = getQueue().length;
+      if (count > 0) {
+        syncText.textContent = count + " scan" + (count === 1 ? "" : "s") + " waiting to sync";
+        syncBar.classList.add("visible");
+      } else {
+        syncBar.classList.remove("visible");
+      }
+    }
+
+    async function syncQueue() {
+      if (isSyncing) return;
+      const queue = getQueue();
+      if (queue.length === 0) return;
+
+      isSyncing = true;
+      syncNowBtn.textContent = "Syncing…";
+      syncNowBtn.disabled = true;
+
+      // Process in order (FIFO) so the actual scan sequence is preserved.
+      // Stop at the first failure — likely still offline — and retry later.
+      while (getQueue().length > 0) {
+        const currentQueue = getQueue();
+        const next = currentQueue[0];
+        const result = await sendToServer(next);
+
+        if (!result.ok) {
+          break; // still offline (or server down) — leave remaining items queued
+        }
+
+        // Success (or a server-side rejection like "Invalid Student ID") — remove from queue either way,
+        // since retrying a request the server already understood and answered won't change the outcome.
+        currentQueue.shift();
+        saveQueue(currentQueue);
+      }
+
+      isSyncing = false;
+      syncNowBtn.textContent = "Sync Now";
+      syncNowBtn.disabled = false;
+    }
+
+    syncNowBtn.addEventListener("click", syncQueue);
+
+    function updateConnBadge() {
+      if (navigator.onLine) {
+        connBadge.textContent = "● Online";
+        connBadge.classList.remove("offline");
+        syncQueue(); // try syncing whenever we regain connectivity
+      } else {
+        connBadge.textContent = "○ Offline — scans will be saved and synced later";
+        connBadge.classList.add("offline");
+      }
+    }
+
+    window.addEventListener("online", updateConnBadge);
+    window.addEventListener("offline", updateConnBadge);
+
+    // Initial state on page load
+    updateConnBadge();
+    updateSyncBar();
+
+    // Periodic retry in case 'online' event doesn't fire reliably (some browsers are inconsistent)
+    setInterval(() => {
+      if (navigator.onLine) syncQueue();
+    }, 20000);
 
     // --- QR camera scanning (armed / one-shot per button press) ---
     const scanBtn = document.getElementById("scan-btn");
@@ -350,7 +537,9 @@
         html5QrCode.pause(true); // freeze the video feed so it can't re-read the same code
       }
 
-      submitScan(decodedText.trim()).finally(() => {
+      const payload = parseQrPayload(decodedText.trim());
+
+      submitScan(payload).finally(() => {
         disarmScanner('Tap "Scan QR Code" for the next student');
       });
     }
